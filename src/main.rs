@@ -2,6 +2,8 @@ use image::RgbImage;
 use std::arch::x86_64::{_mm256_add_pd, _mm256_cmp_pd, _mm256_div_pd, _mm256_mul_pd, _mm256_set1_pd, _mm256_set_pd, _mm256_sub_pd, _mm256_testz_pd};
 use std::path::Path;
 use std::time::Instant;
+use std::sync::{Mutex, Arc};
+use rayon::prelude::*;
 
 const ITERATIONS: u32 = 100;
 const WIDTH: u32 = 3500;
@@ -179,6 +181,93 @@ fn main() {
 	println!("Time for SIMD AVX2 algorithm: {}ms", elapsed.as_millis());    
 	save_fractal(buffer, &Path::new("simd-avx2-sequential.png"));
     }
+
+    // threads
+    println!("Starting Threads algorithm");
+    let buffer: Vec<u8> = vec![0; BUFFER_SIZE];
+    let buffer = Arc::new(Mutex::new(buffer));
+    let now = Instant::now();
+    let cores: usize = std::thread::available_parallelism().unwrap().into();
+    let cores: u32 = cores as u32;
+    println!("Using {} cores", cores);
+    let mut threads = vec![];
+    for core in 0..cores {
+	let x_start = core*WIDTH/cores;
+	let x_end = if core == cores-1 {
+	    WIDTH
+	} else {
+	    (core+1)*WIDTH/cores
+	};
+	let buffer_rc = Arc::clone(&buffer);
+	threads.push(std::thread::spawn(move || {
+	    for x in x_start..x_end {
+		for y in 0..HEIGHT {
+		    let c = Complex {
+			real: x as f64 / 1000.0 - 2.5,
+			im: y as f64 / 1000.0 - 1.0,
+		    };
+		    let mut z = Complex {
+			real: 0.0,
+			im: 0.0,
+		    };
+		    let mut i = 0;
+		    while i < ITERATIONS && z.abs() < 2.0 {
+			z.square();
+			z.plus(&c);
+			i = i + 1;
+		    }
+		    if i == ITERATIONS {
+			let mut buffer = buffer_rc.lock().unwrap();
+			let index = ((y * WIDTH + x) * 3) as usize;
+			buffer[index] = 255;
+			buffer[index+1] = 255;
+			buffer[index+2] = 255;
+		    }
+		}
+	    }
+	}));
+    }
+    for t in threads {
+	t.join().unwrap();
+    }
+    let elapsed = now.elapsed();
+    println!("Time for threaded algorithm: {}ms", elapsed.as_millis());
+    let buffer: Vec<u8> = std::mem::take(&mut buffer.lock().unwrap());
+    save_fractal(buffer, &Path::new("threaded.png"));
+
+    // rayon
+    println!("Starting rayon algorithm");
+    let now = Instant::now();
+    let buffer: Vec<u8> = (0..HEIGHT).into_par_iter().flat_map_iter(|y| {
+	let mut column = Vec::with_capacity(WIDTH as usize * 3);
+	for x in 0..WIDTH {
+	    let c = Complex {
+		real: x as f64 / 1000.0 - 2.5,
+		im: y as f64 / 1000.0 - 1.0,
+	    };
+	    let mut z = Complex {
+		real: 0.0,
+		im: 0.0,
+	    };
+	    let mut i = 0;
+	    while i < ITERATIONS && z.abs() < 2.0 {
+		z.square();
+		z.plus(&c);
+		i = i + 1;
+	    }
+	    if i == ITERATIONS {
+		column.extend_from_slice(&[255, 255, 255]);
+	    } else {
+		column.extend_from_slice(&[0, 0, 0]);
+	    }
+	}
+	column
+    })
+	.collect();
+		
+    let elapsed = now.elapsed();
+    println!("Time for rayon algorithm: {}ms", elapsed.as_millis());
+    save_fractal(buffer, &Path::new("rayon.png"));
 }
 
 
