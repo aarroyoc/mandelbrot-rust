@@ -186,9 +186,9 @@ fn main() {
     println!("Starting Threads algorithm");
     let buffer: Vec<u8> = vec![0; BUFFER_SIZE];
     let buffer = Arc::new(Mutex::new(buffer));
-    let now = Instant::now();
     let cores: usize = std::thread::available_parallelism().unwrap().into();
     let cores: u32 = cores as u32;
+    let now = Instant::now();
     println!("Using {} cores", cores);
     let mut threads = vec![];
     for core in 0..cores {
@@ -304,9 +304,68 @@ fn main() {
     
     let elapsed = now.elapsed();
     println!("Time for rayon-preallocated algorithm: {}ms", elapsed.as_millis());
-    save_fractal(buffer, &Path::new("rayon-preallocated.png"));    
+    save_fractal(buffer, &Path::new("rayon-preallocated.png"));
+
+    // unsafe thread
+    println!("Starting unsafe Threads algorithm");
+    let mut buffer = vec![0u8; BUFFER_SIZE];
+    let raw_buffer = RawBuffer(buffer.as_mut_ptr() as *mut u8);
+    let cores: usize = std::thread::available_parallelism().unwrap().into();
+    let cores: u32 = cores as u32;
+    println!("Using {} cores", cores);
+    let now = Instant::now();
+    let mut threads = vec![];
+    for core in 0..cores {
+	let x_start = core*WIDTH/cores;
+	let x_end = if core == cores-1 {
+	    WIDTH
+	} else {
+	    (core+1)*WIDTH/cores
+	};
+	let raw_buffer_clone = raw_buffer.clone();
+	threads.push(std::thread::spawn(move || {
+	    let q = raw_buffer_clone;
+	    for x in x_start..x_end {
+		for y in 0..HEIGHT {
+		    let c = Complex {
+			real: x as f64 / 1000.0 - 2.5,
+			im: y as f64 / 1000.0 - 1.0,
+		    };
+		    let mut z = Complex {
+			real: 0.0,
+			im: 0.0,
+		    };
+		    let mut i = 0;
+		    while i < ITERATIONS && z.abs() < 2.0 {
+			z.square();
+			z.plus(&c);
+			i = i + 1;
+		    }
+		    if i == ITERATIONS {
+			unsafe {
+			    let index = ((y * WIDTH + x) * 3) as usize;
+			    *q.0.add(index) = 255;
+			    *q.0.add(index + 1) = 255;
+			    *q.0.add(index + 2) = 255;
+			}
+		    }
+		}
+	    }
+	}));
+    }
+    for t in threads {
+	t.join().unwrap();
+    }
+    let elapsed = now.elapsed();
+    println!("Time for unsafe threaded algorithm: {}ms", elapsed.as_millis());
+    save_fractal(buffer, &Path::new("unsafe-threaded.png"));
 }
 
+#[derive(Clone)]
+struct RawBuffer(*mut u8);
+
+unsafe impl Send for RawBuffer {}
+unsafe impl Sync for RawBuffer {}
 
 fn save_fractal(buffer: Vec<u8>, path: &Path) {
     let img = RgbImage::from_raw(WIDTH, HEIGHT, buffer).unwrap();
