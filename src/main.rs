@@ -268,6 +268,43 @@ fn main() {
     let elapsed = now.elapsed();
     println!("Time for rayon algorithm: {}ms", elapsed.as_millis());
     save_fractal(buffer, &Path::new("rayon.png"));
+
+    // rayon pre-allocated
+    println!("Starting rayon pre-allocated algorithm");
+    let now = Instant::now();
+    let mut buffer: Vec<u8> = vec![0; BUFFER_SIZE];
+
+    buffer
+	.par_chunks_exact_mut(3)
+	.enumerate()	
+	.for_each(|(idx, chunk)| {
+	    let x = (idx as u32) % WIDTH;
+	    let y = (idx as u32) / WIDTH;
+
+	    let c = Complex {
+		real: x as f64 / 1000.0 - 2.5,
+		im: y as f64 / 1000.0 - 1.0,
+	    };
+	    let mut z = Complex {
+		real: 0.0,
+		im: 0.0,
+	    };
+	    let mut i = 0;
+	    while i < ITERATIONS && z.abs() < 2.0 {
+		z.square();
+		z.plus(&c);
+		i = i + 1;
+	    }
+	    if i == ITERATIONS {
+		chunk[0] = 255;
+		chunk[1] = 255;
+		chunk[2] = 255;
+	    }
+	});
+    
+    let elapsed = now.elapsed();
+    println!("Time for rayon-preallocated algorithm: {}ms", elapsed.as_millis());
+    save_fractal(buffer, &Path::new("rayon-preallocated.png"));    
 }
 
 
