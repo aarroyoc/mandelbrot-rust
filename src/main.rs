@@ -4,6 +4,8 @@ use std::path::Path;
 use std::time::Instant;
 use std::sync::{Mutex, Arc};
 use rayon::prelude::*;
+use pollster::FutureExt as _;
+use std::sync::mpsc::channel;
 
 const ITERATIONS: u32 = 100;
 const WIDTH: u32 = 3500;
@@ -359,6 +361,79 @@ fn main() {
     let elapsed = now.elapsed();
     println!("Time for unsafe threaded algorithm: {}ms", elapsed.as_millis());
     save_fractal(buffer, &Path::new("unsafe-threaded.png"));
+
+    // wgpu
+    println!("Starting WGPU algorithm");
+    let now = Instant::now();
+    let instance = wgpu::Instance::new(&Default::default());
+    let adapter = instance.request_adapter(&Default::default()).block_on().unwrap();
+    let (device, queue) = adapter.request_device(&Default::default()).block_on().unwrap();
+
+    let shader = device.create_shader_module(wgpu::include_wgsl!("mandelbrot.wgsl"));
+
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("Mandelbrot"),
+        layout: None,
+        module: &shader,
+        entry_point: None,
+        compilation_options: Default::default(),
+        cache: Default::default(),
+    });
+
+
+    let byte_buffer_size = BUFFER_SIZE * std::mem::size_of::<u32>();
+    let buffer = vec![0u32; BUFFER_SIZE];
+    let storage_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("storage"),
+        size: byte_buffer_size as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::STORAGE,
+        mapped_at_creation: false        
+    });
+
+    let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("output"),
+        size: byte_buffer_size as u64,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false
+    });
+
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None,
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: storage_buffer.as_entire_binding(),
+            }
+        ],
+    });
+
+    let mut encoder = device.create_command_encoder(&Default::default());
+    {
+        let mut pass = encoder.begin_compute_pass(&Default::default());
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(350, 200, 1);
+    }
+
+    encoder.copy_buffer_to_buffer(&storage_buffer, 0, &output_buffer, 0, output_buffer.size());
+
+    queue.write_buffer(&storage_buffer, 0, bytemuck::cast_slice(&buffer));
+    queue.submit([encoder.finish()]);
+
+    {
+        let (tx, rx) = channel();
+        output_buffer.map_async(wgpu::MapMode::Read, .., move |result| tx.send(result).unwrap());
+        device.poll(wgpu::PollType::Wait).unwrap();
+        rx.recv().unwrap().unwrap();
+        let elapsed = now.elapsed();
+        println!("Time for WGPU algorithm: {}ms", elapsed.as_millis());
+        let output_data = output_buffer.get_mapped_range(..);
+        let data: &[u32] = bytemuck::cast_slice(&output_data);
+        let data_u8 = data.into_iter().map(|x| *x as u8).collect();
+        save_fractal(data_u8, &Path::new("wgpu.png"));
+    }
+    
 }
 
 #[derive(Clone)]
