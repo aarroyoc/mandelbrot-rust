@@ -6,6 +6,18 @@ use std::sync::{Mutex, Arc};
 use rayon::prelude::*;
 use pollster::FutureExt as _;
 use std::sync::mpsc::channel;
+#[cfg(feature = "display")]
+use winit::event::{Event, WindowEvent, ElementState};
+#[cfg(feature = "display")]
+use winit::event_loop::{ControlFlow, EventLoop};
+#[cfg(feature = "display")]
+use winit::window::WindowBuilder;
+#[cfg(feature = "display")]
+use winit::keyboard::{KeyCode, PhysicalKey};
+#[cfg(feature = "display")]
+use std::num::NonZeroU32;
+#[cfg(feature = "display")]
+use std::rc::Rc;
 
 const ITERATIONS: u32 = 100;
 const WIDTH: u32 = 3500;
@@ -36,6 +48,8 @@ impl Complex {
 }
 
 fn main() {
+    let mut results: Vec<(String, Vec<u8>)> = Vec::new();
+
     // sequential
     println!("Starting Sequential algorithm");
     let mut buffer: Vec<u8> = vec![0; BUFFER_SIZE];
@@ -67,7 +81,8 @@ fn main() {
     }
     let elapsed = now.elapsed();
     println!("Time for Sequential algorithm: {}ms", elapsed.as_millis());    
-    save_fractal(buffer, &Path::new("sequential.png"));
+    save_fractal(&buffer, &Path::new("sequential.png"));
+    results.push(("Sequential".to_string(), buffer));
 
     // optimized sequential
     println!("Starting Optimized Sequential algorithm");
@@ -101,7 +116,8 @@ fn main() {
     }
     let elapsed = now.elapsed();
     println!("Time for Optimized Sequential algorithm: {}ms", elapsed.as_millis());    
-    save_fractal(buffer, &Path::new("opti-sequential.png"));
+    save_fractal(&buffer, &Path::new("opti-sequential.png"));
+    results.push(("Optimized Sequential".to_string(), buffer));
 
     // SIMD
     if is_x86_feature_detected!("avx2") {
@@ -181,7 +197,8 @@ fn main() {
 	}
 	let elapsed = now.elapsed();
 	println!("Time for SIMD AVX2 algorithm: {}ms", elapsed.as_millis());    
-	save_fractal(buffer, &Path::new("simd-avx2-sequential.png"));
+	save_fractal(&buffer, &Path::new("simd-avx2-sequential.png"));
+    results.push(("SIMD AVX2".to_string(), buffer));
     }
 
     // threads
@@ -235,7 +252,8 @@ fn main() {
     let elapsed = now.elapsed();
     println!("Time for threaded algorithm: {}ms", elapsed.as_millis());
     let buffer: Vec<u8> = std::mem::take(&mut buffer.lock().unwrap());
-    save_fractal(buffer, &Path::new("threaded.png"));
+    save_fractal(&buffer, &Path::new("threaded.png"));
+    results.push(("Threaded".to_string(), buffer));
 
     // rayon
     println!("Starting rayon algorithm");
@@ -269,7 +287,8 @@ fn main() {
 		
     let elapsed = now.elapsed();
     println!("Time for rayon algorithm: {}ms", elapsed.as_millis());
-    save_fractal(buffer, &Path::new("rayon.png"));
+    save_fractal(&buffer, &Path::new("rayon.png"));
+    results.push(("Rayon".to_string(), buffer));
 
     // rayon pre-allocated
     println!("Starting rayon pre-allocated algorithm");
@@ -306,7 +325,8 @@ fn main() {
     
     let elapsed = now.elapsed();
     println!("Time for rayon-preallocated algorithm: {}ms", elapsed.as_millis());
-    save_fractal(buffer, &Path::new("rayon-preallocated.png"));
+    save_fractal(&buffer, &Path::new("rayon-preallocated.png"));
+    results.push(("Rayon Preallocated".to_string(), buffer));
 
     // unsafe thread
     println!("Starting unsafe Threads algorithm");
@@ -360,7 +380,8 @@ fn main() {
     }
     let elapsed = now.elapsed();
     println!("Time for unsafe threaded algorithm: {}ms", elapsed.as_millis());
-    save_fractal(buffer, &Path::new("unsafe-threaded.png"));
+    save_fractal(&buffer, &Path::new("unsafe-threaded.png"));
+    results.push(("Unsafe Threaded".to_string(), buffer));
 
     // wgpu
     println!("Starting WGPU algorithm");
@@ -430,10 +451,13 @@ fn main() {
         println!("Time for WGPU algorithm: {}ms", elapsed.as_millis());
         let output_data = output_buffer.get_mapped_range(..);
         let data: &[u32] = bytemuck::cast_slice(&output_data);
-        let data_u8 = data.into_iter().map(|x| *x as u8).collect();
-        save_fractal(data_u8, &Path::new("wgpu.png"));
+        let data_u8: Vec<u8> = data.into_iter().map(|x| *x as u8).collect();
+        save_fractal(&data_u8, &Path::new("wgpu.png"));
+        results.push(("WGPU".to_string(), data_u8));
     }
     
+    #[cfg(feature = "display")]
+    run_display(results);
 }
 
 #[derive(Clone)]
@@ -442,8 +466,101 @@ struct RawBuffer(*mut u8);
 unsafe impl Send for RawBuffer {}
 unsafe impl Sync for RawBuffer {}
 
-fn save_fractal(buffer: Vec<u8>, path: &Path) {
-    let img = RgbImage::from_raw(WIDTH, HEIGHT, buffer).unwrap();
+fn save_fractal(buffer: &[u8], path: &Path) {
+    let img = RgbImage::from_raw(WIDTH, HEIGHT, buffer.to_vec()).unwrap();
 
     img.save(path).unwrap();
+}
+
+#[cfg(feature = "display")]
+fn run_display(results: Vec<(String, Vec<u8>)>) {
+    let event_loop = EventLoop::new().unwrap();
+    let window = Rc::new(WindowBuilder::new()
+        .with_title("Mandelbrot - Sequential")
+        .with_inner_size(winit::dpi::LogicalSize::new(WIDTH as f64 / 2.0, HEIGHT as f64 / 2.0))
+        .build(&event_loop)
+        .unwrap());
+    
+    let context = softbuffer::Context::new(window.clone()).unwrap();
+    let mut surface = softbuffer::Surface::new(&context, window.clone()).unwrap();
+
+    let mut current_index = 0;
+    
+    event_loop.run(move |event, elwt| {
+        elwt.set_control_flow(ControlFlow::Wait);
+
+        match event {
+            Event::WindowEvent { window_id, event: WindowEvent::RedrawRequested } if window_id == window.id() => {
+                if let Some((name, buffer)) = results.get(current_index) {
+                    window.set_title(&format!("Mandelbrot - {}", name));
+                    
+                    let (width, height) = {
+                        let size = window.inner_size();
+                        (size.width, size.height)
+                    };
+                    
+                    surface.resize(
+                        NonZeroU32::new(width).unwrap(),
+                        NonZeroU32::new(height).unwrap(),
+                    ).unwrap();
+
+                    let mut surface_buffer = surface.buffer_mut().unwrap();
+
+                    // Simple nearest neighbor scaling or centering would be nice, 
+                    // but for now let's just copy what fits or scale simply?
+                    // The buffer is WIDTH x HEIGHT (3500 x 2000).
+                    // The window might be smaller.
+                    // softbuffer expects u32 (00RRGGBB).
+                    // Our buffer is RGB u8.
+                    
+                    for index in 0..(width * height) {
+                        let y = index / width;
+                        let x = index % width;
+                        
+                        // Map window coordinates to image coordinates
+                        let img_x = (x as u64 * WIDTH as u64 / width as u64) as usize;
+                        let img_y = (y as u64 * HEIGHT as u64 / height as u64) as usize;
+                        
+                        if img_x < WIDTH as usize && img_y < HEIGHT as usize {
+                            let img_idx = (img_y * WIDTH as usize + img_x) * 3;
+                            if img_idx + 2 < buffer.len() {
+                                let r = buffer[img_idx] as u32;
+                                let g = buffer[img_idx+1] as u32;
+                                let b = buffer[img_idx+2] as u32;
+                                surface_buffer[index as usize] = (r << 16) | (g << 8) | b;
+                            }
+                        }
+                    }
+                    
+                    surface_buffer.present().unwrap();
+                }
+            },
+            Event::WindowEvent { window_id, event: WindowEvent::CloseRequested } if window_id == window.id() => {
+                elwt.exit();
+            },
+            Event::WindowEvent { window_id, event: WindowEvent::KeyboardInput { event: key_event, .. } } if window_id == window.id() => {
+                if key_event.state == ElementState::Pressed {
+                    match key_event.physical_key {
+                        PhysicalKey::Code(KeyCode::Space) | PhysicalKey::Code(KeyCode::ArrowRight) => {
+                            current_index = (current_index + 1) % results.len();
+                            window.request_redraw();
+                        },
+                        PhysicalKey::Code(KeyCode::ArrowLeft) => {
+                            if current_index == 0 {
+                                current_index = results.len() - 1;
+                            } else {
+                                current_index -= 1;
+                            }
+                            window.request_redraw();
+                        },
+                        PhysicalKey::Code(KeyCode::Escape) => {
+                            elwt.exit();
+                        },
+                        _ => {}
+                    }
+                }
+            },
+            _ => {}
+        }
+    }).unwrap();
 }
